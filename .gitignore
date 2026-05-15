@@ -1,0 +1,26 @@
+# 个人 markdown 测试输入(不传)
+*.md
+!README.md
+!CHANGELOG.md
+
+# 渲染产物
+*.html
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Temp
+/tmp/
+*.tmp
