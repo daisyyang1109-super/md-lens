@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.1] - 2026-05-15 · 内置 --install 一键装
+
+### 新增
+- **`python3 md-lens.py --install`** — 自动 cp 到 `~/.claude/md-lens/` 标准位置,提示 alias 配置
+- 之后任意位置 `md-lens some-doc.md` 即可
+
+### 改进
+- README 优先推荐 `--install` 方式
+
 ## [0.1.0] - 2026-05-15 · Initial release
 
 ### 主要功能

@@ -38,14 +38,32 @@
 
 ## 快速开始
 
+### 一键安装(推荐)
+
 ```bash
-# clone
 git clone https://github.com/daisyyang1109-super/md-lens.git ~/md-lens
+python3 ~/md-lens/md-lens.py --install
+```
 
-# 渲染任意 markdown
+自动把 md-lens.py cp 到 `~/.claude/md-lens/`,提示你加 alias:
+
+```bash
+echo "alias md-lens='python3 ~/.claude/md-lens/md-lens.py'" >> ~/.zshrc
+source ~/.zshrc
+```
+
+之后任意位置都能跑:
+
+```bash
+md-lens some-doc.md                  # 渲染同名 .html 并打开
+md-lens some-doc.md "标题"           # 自定义标题
+md-lens some-doc.md '标题' out.html  # 指定输出路径
+```
+
+### 或者直接跑(不装)
+
+```bash
 python3 ~/md-lens/md-lens.py path/to/your.md "页面标题" output.html
-
-# 打开
 open output.html
 ```
 

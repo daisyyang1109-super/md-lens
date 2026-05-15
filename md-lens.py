@@ -1,10 +1,44 @@
 #!/usr/bin/env python3
-"""Markdown → HTML 渲染器,含 TOC 浮动 sidebar + 阅读优化样式。
+"""Markdown → HTML 渲染器,含 TOC 浮动 sidebar + 阅读优化样式 + 选段批注 + 编辑模式。
 
 Usage:
-  python3 md2html.py <input.md> [title] [output.html]
+  python3 md-lens.py --install                       # 一键装到 ~/.claude/md-lens/(配 alias 全局可用)
+  python3 md-lens.py <input.md> [title] [output.html]
 """
-import sys, html
+import sys, html, os, shutil
+
+
+def self_install():
+    """把 md-lens.py cp 到 ~/.claude/md-lens/,提示 alias 设置。"""
+    src = os.path.abspath(__file__)
+    target_dir = os.path.expanduser("~/.claude/md-lens")
+    target = os.path.join(target_dir, "md-lens.py")
+    os.makedirs(target_dir, exist_ok=True)
+    shutil.copy2(src, target)
+    print("==> md-lens 装到 " + target)
+    print()
+    print("下一步:加 alias 让任意位置都能跑(选一个):")
+    print()
+    print("  # 方式 1:加到 ~/.zshrc / ~/.bashrc")
+    print("  alias md-lens='python3 ~/.claude/md-lens/md-lens.py'")
+    print()
+    print("  # 方式 2:或者直接跑")
+    print("  python3 ~/.claude/md-lens/md-lens.py <file.md>")
+    print()
+    print("之后用法:")
+    print("  md-lens some-doc.md                  # 渲染同名 .html 并打开")
+    print('  md-lens some-doc.md "页面标题"        # 自定义标题')
+    print("  md-lens some-doc.md '标题' out.html  # 指定输出路径")
+    sys.exit(0)
+
+
+# 入口
+if len(sys.argv) >= 2 and sys.argv[1] == "--install":
+    self_install()
+
+if len(sys.argv) < 2:
+    print(__doc__)
+    sys.exit(1)
 
 src_path = sys.argv[1]
 title = sys.argv[2] if len(sys.argv) > 2 else "Document"
