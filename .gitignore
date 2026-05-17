@@ -2,6 +2,7 @@
 *.md
 !README.md
 !CHANGELOG.md
+!docs/**/*.md
 
 # 渲染产物
 *.html
