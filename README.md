@@ -58,6 +58,8 @@ source ~/.zshrc
 md-lens some-doc.md                  # 渲染同名 .html 并打开
 md-lens some-doc.md "标题"           # 自定义标题
 md-lens some-doc.md '标题' out.html  # 指定输出路径
+md-lens --vault ~/projects/docs      # vault mode:目录下全部 .md 一站式
+md-lens --vault . --port 8080        # vault 可选 port(默认 8000)
 ```
 
 ### 或者直接跑(不装)
@@ -119,12 +121,37 @@ md-lens 是 [mirror-viewer](https://github.com/daisyyang1109-super/mirror-viewer
 
 ---
 
+## Vault mode(0.2.0 新)
+
+一个目录下 30+ md 文件,跨文件跳来跳去 / 搜不到 / 关联看不到 — 这种"轻量 Obsidian"场景:
+
+```bash
+md-lens --vault ~/projects/some-docs
+# 浏览器自动开 → 左侧文件树 + 搜索框 + 内容面板
+```
+
+特性:
+
+- **文件树 sidebar**:嵌套目录可折叠(展开状态记 localStorage)
+- **全文搜索**:启动时 ship 全部 md 到前端,搜索是 in-memory(< 100ms)
+- **SPA 切换**:点 file → swap 内容,URL hash 同步,刷新页面恢复当前文件
+- **per-file 批注**:每个 .md 独立 localStorage,不串台
+- **保存回 vault**:编辑 → 点「💾 保存到 vault」直接覆盖原 .md(server 端 path traversal 防护)
+- **0 dependency**:Python stdlib `http.server` + 前端 CDN marked/turndown,clone 完就跑
+
+**适合场景**:`daisy-rpg/docs/` 这种 30+ md 单项目文档库 · BUG-TRACKER + 设计文档 + brief 同时翻 · 不用切 IDE 就能改
+
+不适合 1000+ md 的大 vault(future PR 优化 lazy load + indexed search)。
+
+---
+
 ## Roadmap
 
 - [x] 0.1.0:渲染 + TOC + 批注 4 类 + 编辑模式 + 导出 MD
-- [ ] 0.2.0:GitHub Gist 云同步(批注跨设备)
-- [ ] 0.3.0:多文档 dashboard(同时管理多个 .md)
-- [ ] 0.4.0:选段一键出图(集成 mermaid + AI 出图)
+- [x] 0.2.0:`--vault` 模式 · 文件树 + 全文搜索 + 保存回 vault
+- [ ] 0.3.0:GitHub Gist 云同步(批注跨设备)
+- [ ] 0.4.0:vault 索引优化 · 支持 1000+ file
+- [ ] 0.5.0:选段一键出图(集成 mermaid + AI 出图)
 
 ---
 

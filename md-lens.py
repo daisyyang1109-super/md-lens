@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Markdown → HTML 渲染器,含 TOC 浮动 sidebar + 阅读优化样式 + 选段批注 + 编辑模式。
 
 Usage:
   python3 md-lens.py --install                       # 一键装到 ~/.claude/md-lens/(配 alias 全局可用)
-  python3 md-lens.py <input.md> [title] [output.html]
+  python3 md-lens.py <input.md> [title] [output.html]   # 单文件 mode(生成 .html)
+  python3 md-lens.py --vault <dir> [--port 8000]        # vault mode(目录下所有 .md,起本地 server)
 """
 import sys, html, os, shutil
 
@@ -29,15 +31,409 @@ def self_install():
     print("  md-lens some-doc.md                  # 渲染同名 .html 并打开")
     print('  md-lens some-doc.md "页面标题"        # 自定义标题')
     print("  md-lens some-doc.md '标题' out.html  # 指定输出路径")
+    print("  md-lens --vault ~/some/dir           # vault mode:目录下所有 .md")
     sys.exit(0)
 
 
-# 入口
+# ========== vault mode ==========
+def collect_md_files(vault_root):
+    """walk vault root,收所有 .md(skip 隐藏 / .git / node_modules 等)。返回相对 path str 列表。"""
+    from pathlib import Path
+    skip_dirs = {'.git', 'node_modules', '.next', '__pycache__', '.venv', 'venv', 'dist', 'build'}
+    root = Path(vault_root).resolve()
+    out = []
+    for p in root.rglob('*.md'):
+        parts = p.relative_to(root).parts
+        if any(part in skip_dirs for part in parts): continue
+        if any(part.startswith('.') for part in parts): continue
+        out.append(str(p.relative_to(root)))
+    out.sort()
+    return out
+
+
+_VAULT_CSS = (
+":root{color-scheme:light dark;--bg:#fafaf8;--fg:#1d1d1f;--muted:#6e6e73;--accent:#36c;--border:#0001;--code-bg:#f3f3f0;--pre-bg:#f6f6f3;--side-bg:#f2f2ef;--side-hover:#e6e6e0;--side-active:#dbe4fb;--bq-bg:#f0f4ff}"
+"@media(prefers-color-scheme:dark){:root{--bg:#1a1a1a;--fg:#ececec;--muted:#9a9a9a;--accent:#69b1ff;--border:#fff2;--code-bg:#252525;--pre-bg:#1f1f1f;--side-bg:#141414;--side-hover:#222;--side-active:#1d2a4d;--bq-bg:#1a2540}}"
+"*{box-sizing:border-box}html{scroll-behavior:smooth}"
+"body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.75 -apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;-webkit-font-smoothing:antialiased}"
+".app{display:flex;min-height:100vh}"
+".sidebar{width:260px;flex-shrink:0;background:var(--side-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;height:100vh;position:sticky;top:0}"
+".side-head{padding:14px 14px 8px;border-bottom:1px solid var(--border)}"
+".side-title{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:600;margin-bottom:6px}"
+".side-vault{font-size:13px;font-weight:600;word-break:break-all}"
+".side-search{margin:10px 14px 8px}"
+".side-search input{width:100%;padding:7px 10px;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:inherit}"
+".side-search input:focus{outline:none;border-color:var(--accent)}"
+".side-tree{flex:1;overflow-y:auto;padding:4px 0 8px}"
+".tree-dir{user-select:none}"
+".tree-dir-name{padding:4px 10px 4px 6px;cursor:pointer;font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:4px;border-radius:4px;margin:1px 6px}"
+".tree-dir-name:hover{background:var(--side-hover)}"
+".tree-dir-name .caret{display:inline-block;width:12px;transition:transform .12s;font-size:10px}"
+".tree-dir.collapsed > .tree-dir-children{display:none}"
+".tree-dir.collapsed > .tree-dir-name .caret{transform:rotate(-90deg)}"
+".tree-dir-children{padding-left:14px}"
+".tree-file{padding:4px 10px 4px 18px;cursor:pointer;font-size:13px;border-radius:4px;margin:1px 6px;word-break:break-all;line-height:1.4}"
+".tree-file:hover{background:var(--side-hover)}"
+".tree-file.active{background:var(--side-active);color:var(--accent);font-weight:500}"
+".search-results{padding:4px 12px;font-size:12px}"
+".search-hit{padding:6px 8px;margin:3px 0;background:var(--bg);border:1px solid var(--border);border-radius:5px;cursor:pointer;line-height:1.35}"
+".search-hit:hover{border-color:var(--accent)}"
+".search-hit-file{font-size:10.5px;color:var(--muted);margin-bottom:2px}"
+".search-hit-snippet{font-size:11.5px}"
+".search-hit-snippet mark{background:rgba(54,102,204,.25);color:inherit;padding:0 2px;border-radius:2px}"
+".search-empty{padding:12px;text-align:center;color:var(--muted);font-size:12px}"
+".side-foot{padding:8px 14px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}"
+".main{flex:1;min-width:0;display:flex;justify-content:center;padding:32px 40px 80px;gap:36px;overflow-x:hidden}"
+".content{flex:1;max-width:780px;min-width:0}"
+".toc{position:sticky;top:32px;width:220px;max-height:calc(100vh - 64px);overflow-y:auto;flex-shrink:0;align-self:flex-start;font-size:13px;padding:14px 16px;border:1px solid var(--border);border-radius:10px;background:color-mix(in srgb,var(--bg) 90%,transparent)}"
+".toc-title{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:10px;font-weight:600}"
+".toc ul{list-style:none;padding:0;margin:0}"
+".toc a{display:block;color:var(--muted);text-decoration:none;line-height:1.45;padding:5px 10px;border-left:2px solid transparent;border-radius:0 4px 4px 0;font-size:12.5px}"
+".toc a:hover,.toc a.active{color:var(--accent);border-left-color:var(--accent)}"
+".toc a.active{font-weight:600;background:color-mix(in srgb,var(--accent) 8%,transparent)}"
+".toc-h3 a{padding-left:22px;font-size:12px;opacity:.85}"
+".toc-h3 a::before{content:'·';margin-right:5px}"
+"@media(max-width:1100px){.toc{display:none}}"
+"@media(max-width:760px){.sidebar{width:200px}.main{padding:18px 16px}}"
+"h1,h2,h3,h4{line-height:1.3;letter-spacing:-.01em}"
+"h1{font-size:30px;font-weight:700;margin:.4em 0 .5em;padding-bottom:.35em;border-bottom:2px solid var(--border)}"
+"h2{font-size:22px;font-weight:650;margin:2em 0 .55em;padding-bottom:.25em;border-bottom:1px solid var(--border)}"
+"h2::before{content:'';display:inline-block;width:4px;height:.85em;background:var(--accent);margin-right:10px;vertical-align:middle;border-radius:2px}"
+"h3{font-size:17px;font-weight:600;margin:1.7em 0 .5em;color:color-mix(in srgb,var(--fg) 90%,var(--accent))}"
+"h4{font-size:15px;font-weight:600;margin:1.3em 0 .4em}"
+"p{margin:.9em 0}strong{font-weight:650}"
+"code{background:var(--code-bg);padding:2px 7px;border-radius:4px;font-size:.88em;font-family:ui-monospace,'SF Mono',monospace;color:color-mix(in srgb,var(--fg) 80%,var(--accent))}"
+"pre{background:var(--pre-bg);padding:16px 18px;border-radius:10px;overflow-x:auto;font-size:13.5px;line-height:1.6;border:1px solid var(--border);margin:1.2em 0}"
+"pre code{background:transparent;padding:0;color:var(--fg)}"
+"table{border-collapse:separate;border-spacing:0;width:100%;margin:1.4em 0;font-size:14px;border:1px solid var(--border);border-radius:8px;overflow:hidden}"
+"th{background:var(--code-bg);font-weight:600;text-align:left;padding:10px 14px;font-size:13px}"
+"td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:top;font-size:14px;line-height:1.6}"
+"tr:last-child td{border-bottom:none}"
+"ul,ol{padding-left:1.7em;margin:.6em 0}li{margin:.4em 0;line-height:1.7}"
+"blockquote{margin:1.4em 0;padding:12px 18px;border-left:4px solid var(--accent);background:var(--bq-bg);border-radius:0 6px 6px 0}"
+"a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}a:hover{border-bottom-color:var(--accent)}"
+"hr{border:0;border-top:1px solid var(--border);margin:2.2em 0}img{max-width:100%;border-radius:8px;margin:1em 0}"
+".welcome{padding:40px 0;color:var(--muted)}.welcome h2{border:none;padding:0;margin-top:0}.welcome h2::before{display:none}"
+".ann-toolbar{position:fixed;display:none;background:#222;border-radius:8px;padding:6px;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:1000;gap:4px;align-items:center}"
+".ann-toolbar.show{display:inline-flex}"
+".ann-toolbar button{background:transparent;border:none;color:#fff;cursor:pointer;font-size:18px;padding:5px 9px;border-radius:4px;line-height:1}"
+".ann-toolbar button:hover{background:rgba(255,255,255,.15)}"
+".ann-toolbar .fmt-btn{display:none;font-size:12px;padding:5px 8px;min-width:28px}"
+".ann-toolbar.edit-mode .fmt-btn{display:inline-flex;align-items:center}.ann-toolbar.edit-mode .ann-only{display:none}"
+".ann-mark{padding:0 2px;border-radius:3px;cursor:pointer;border-bottom:2px solid}"
+".ann-mark[data-type=good]{background:rgba(42,170,80,.18);border-bottom-color:#2a7}"
+".ann-mark[data-type=bad]{background:rgba(204,68,68,.18);border-bottom-color:#c44}"
+".ann-mark[data-type=suggest]{background:rgba(204,136,0,.18);border-bottom-color:#c80}"
+".ann-mark[data-type=question]{background:rgba(102,153,187,.18);border-bottom-color:#69b}"
+".ann-panel{position:fixed;right:20px;bottom:80px;width:300px;max-height:60vh;overflow-y:auto;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:14px;box-shadow:0 4px 20px rgba(0,0,0,.15);z-index:100;font-size:13px;display:none}"
+".ann-panel.open{display:block}"
+".ann-list-item{margin:8px 0;padding:8px 10px;background:color-mix(in srgb,var(--fg) 4%,transparent);border-radius:6px;border-left:3px solid;font-size:12px}"
+".ann-list-item[data-type=good]{border-left-color:#2a7}.ann-list-item[data-type=bad]{border-left-color:#c44}"
+".ann-list-item[data-type=suggest]{border-left-color:#c80}.ann-list-item[data-type=question]{border-left-color:#69b}"
+".ann-list-text{color:var(--muted);font-size:11px;margin-bottom:4px;font-style:italic;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}"
+".ann-list-actions{margin-top:6px;display:flex;gap:6px}"
+".ann-list-actions button{font-size:10px;background:none;border:1px solid var(--border);padding:2px 6px;border-radius:3px;cursor:pointer;color:var(--muted)}"
+".ann-fab{position:fixed;right:20px;bottom:20px;background:var(--accent);color:#fff;border:none;border-radius:24px;padding:10px 16px;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.2);z-index:99;display:none;align-items:center;gap:8px}"
+".ann-fab.show{display:flex}"
+".ann-fab-count{background:rgba(255,255,255,.25);padding:2px 8px;border-radius:10px;font-size:11px}"
+".ann-dialog{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.25);z-index:1001;min-width:380px;max-width:520px;display:none}"
+".ann-dialog.show{display:block}.ann-dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1000;display:none}.ann-dialog-overlay.show{display:block}"
+".ann-dialog h3{margin:0 0 8px;font-size:15px}"
+".ann-dialog .ann-selected{background:var(--code-bg);padding:8px 10px;border-radius:6px;font-size:12px;color:var(--muted);max-height:80px;overflow-y:auto;margin-bottom:12px;border-left:3px solid var(--accent);font-style:italic}"
+".ann-dialog textarea{width:100%;min-height:80px;padding:8px 10px;font:13px/1.5 inherit;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);box-sizing:border-box}"
+".ann-dialog-actions{margin-top:12px;display:flex;gap:8px;justify-content:flex-end}"
+".ann-dialog button{padding:7px 14px;font-size:13px;border-radius:6px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--fg)}.ann-dialog button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}"
+"#root[contenteditable=true]{outline:2px dashed var(--accent);outline-offset:8px;border-radius:8px;padding:8px;min-height:200px}"
+".edit-fab{position:fixed;right:20px;bottom:70px;background:#3a7;color:#fff;border:none;border-radius:24px;padding:10px 16px;font-size:13px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.2);z-index:99;display:none}.edit-fab.show{display:flex}.edit-fab.active{background:#c44}"
+".save-fab{position:fixed;right:170px;bottom:20px;background:transparent;color:var(--accent);border:1px solid var(--accent);border-radius:24px;padding:10px 16px;font-size:13px;cursor:pointer;z-index:99;display:none}.save-fab.show{display:block}.save-fab:hover{background:var(--accent);color:#fff}"
+".edit-banner{position:fixed;top:0;left:260px;right:0;background:#3a7;color:#fff;padding:5px 14px;font-size:12px;text-align:center;z-index:1100;display:none}.edit-banner.show{display:block}"
+".toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 18px;border-radius:8px;font-size:13px;z-index:2000;opacity:0;transition:opacity .2s}.toast.show{opacity:1}"
+)
+
+_VAULT_BODY = (
+'<div class="app"><aside class="sidebar">'
+'<div class="side-head"><div class="side-title">md-lens vault</div><div class="side-vault" id="vault-name">__VAULT_NAME__</div></div>'
+'<div class="side-search"><input id="search-input" type="search" placeholder="搜索全部 .md(本地 instant)" autocomplete="off"></div>'
+'<div class="side-tree" id="side-tree"><div style="padding:14px;color:var(--muted);font-size:12px">加载中...</div></div>'
+'<div class="side-foot" id="side-foot">—</div></aside>'
+'<main class="main">'
+'<article class="content"><div id="root"><div class="welcome"><h2>md-lens vault</h2><p>左侧点 .md 文件开始阅读 · 上方搜索框全文搜 · 选段加批注 · 改完点保存</p></div></div></article>'
+'<aside class="toc" id="toc-side" style="display:none"><div class="toc-title">目录</div><ul id="toc-list"></ul></aside>'
+'</main></div>'
+'<div class="ann-toolbar" id="ann-toolbar">'
+'<button class="ann-only" data-type="good" title="标好">👍</button>'
+'<button class="ann-only" data-type="bad" title="不好">👎</button>'
+'<button class="ann-only" data-type="suggest" title="建议">💡</button>'
+'<button class="ann-only" data-type="question" title="疑问">❓</button>'
+'<button class="fmt-btn" data-fmt="h2">H2</button><button class="fmt-btn" data-fmt="h3">H3</button>'
+'<button class="fmt-btn" data-fmt="p">P</button>'
+'<button class="fmt-btn" data-fmt="bold" style="font-weight:700">B</button>'
+'<button class="fmt-btn" data-fmt="italic" style="font-style:italic">I</button>'
+'<button class="fmt-btn" data-fmt="code">{}</button>'
+'<button class="fmt-btn" data-fmt="quote">引用</button>'
+'<button class="fmt-btn" data-fmt="ul">列表</button></div>'
+'<div class="ann-panel" id="ann-panel">'
+'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)">'
+'<span style="font-weight:600;font-size:13px">批注 <span id="ann-count">0</span></span>'
+'<button id="ann-close" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--muted)">×</button></div>'
+'<div id="ann-list"></div>'
+'<div style="margin-top:10px;display:flex;gap:6px">'
+'<button id="ann-copy" style="flex:1;padding:6px;font-size:11px;background:var(--accent);color:#fff;border:none;border-radius:5px;cursor:pointer">复制 MD</button>'
+'<button id="ann-clear" style="padding:6px;font-size:11px;background:transparent;color:#c44;border:1px solid #c44;border-radius:5px;cursor:pointer">清空</button></div></div>'
+'<button class="ann-fab" id="ann-fab">📝 批注 <span class="ann-fab-count" id="ann-fab-count">0</span></button>'
+'<button class="edit-fab" id="edit-fab">✏ 编辑</button>'
+'<button class="save-fab" id="save-fab" title="保存改动回 vault 文件">💾 保存到 vault</button>'
+'<div class="edit-banner" id="edit-banner">✏ 编辑模式 · 改完点「保存到 vault」写回原文件 '
+'<button id="exit-edit" style="background:rgba(255,255,255,.2);color:#fff;border:none;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:10px">退出</button></div>'
+'<div class="ann-dialog-overlay" id="ann-overlay"></div>'
+'<div class="ann-dialog" id="ann-dialog">'
+'<h3 id="ann-dialog-title">添加批注</h3>'
+'<div class="ann-selected" id="ann-dialog-selected"></div>'
+'<textarea id="ann-dialog-comment" placeholder="说明(可选)..."></textarea>'
+'<div class="ann-dialog-actions"><button id="ann-cancel">取消</button><button id="ann-confirm" class="primary">保存</button></div></div>'
+'<div class="toast" id="toast"></div>'
+)
+
+# JS:vault SPA(树 / 搜索 / 批注 / 编辑 / 保存回 vault)
+# 注释保留中文,逻辑保留 readable
+_VAULT_JS = r"""
+const VAULT_HASH='__VAULT_HASH__',KEY_PREFIX='mdlens:vault:'+VAULT_HASH+':';
+const TYPE_META={good:{i:'👍',n:'好'},bad:{i:'👎',n:'不好'},suggest:{i:'💡',n:'建议'},question:{i:'❓',n:'疑问'}};
+let SEARCH_INDEX=[],currentFile=null,currentRaw='',annotations=[];
+const root=document.getElementById('root'),tocList=document.getElementById('toc-list'),tocSide=document.getElementById('toc-side');
+function toast(m,ms){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),ms||1800);}
+function escHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+// ---- 文件树 ----
+function buildTree(files){const tree={};for(const f of files){const parts=f.path.split('/');let n=tree;for(let i=0;i<parts.length-1;i++){n._dirs=n._dirs||{};n._dirs[parts[i]]=n._dirs[parts[i]]||{};n=n._dirs[parts[i]];}n._files=n._files||[];n._files.push({name:parts[parts.length-1],path:f.path});}return tree;}
+function loadExpanded(){try{return new Set(JSON.parse(localStorage.getItem(KEY_PREFIX+'expanded_dirs')||'[]'));}catch{return new Set();}}
+function saveExpanded(s){try{localStorage.setItem(KEY_PREFIX+'expanded_dirs',JSON.stringify([...s]));}catch{}}
+function renderTree(node,parent,expanded,prefix){prefix=prefix||'';if(node._dirs){for(const dn of Object.keys(node._dirs).sort()){const full=prefix+dn+'/';const div=document.createElement('div');div.className='tree-dir'+(expanded.has(full)?'':' collapsed');const name=document.createElement('div');name.className='tree-dir-name';name.innerHTML='<span class="caret">▼</span>📁 '+escHtml(dn);name.onclick=()=>{div.classList.toggle('collapsed');if(div.classList.contains('collapsed'))expanded.delete(full);else expanded.add(full);saveExpanded(expanded);};div.appendChild(name);const kids=document.createElement('div');kids.className='tree-dir-children';renderTree(node._dirs[dn],kids,expanded,full);div.appendChild(kids);parent.appendChild(div);}}
+if(node._files){node._files.sort((a,b)=>a.name.localeCompare(b.name));for(const f of node._files){const el=document.createElement('div');el.className='tree-file';el.textContent='📄 '+f.name;el.dataset.path=f.path;el.title=f.path;el.onclick=()=>loadFile(f.path);parent.appendChild(el);}}}
+function markActiveFile(p){document.querySelectorAll('.tree-file').forEach(el=>{el.classList.toggle('active',el.dataset.path===p);if(el.dataset.path===p)el.scrollIntoView({block:'nearest'});});}
+// ---- 加载 + 渲染单文件 ----
+async function loadFile(path){try{const r=await fetch('/api/file?path='+encodeURIComponent(path));if(!r.ok){const e=await r.json().catch(()=>({}));toast('加载失败:'+(e.error||r.status));return;}
+const d=await r.json();currentFile=path;currentRaw=d.raw;document.title=d.title+' · md-lens vault';root.innerHTML=marked.parse(d.raw);buildToc();markActiveFile(path);location.hash='file='+encodeURIComponent(path);loadAnnotations();document.getElementById('ann-fab').classList.add('show');document.getElementById('edit-fab').classList.add('show');}catch(err){toast('加载失败:'+err.message);}}
+function buildToc(){tocList.innerHTML='';const hs=root.querySelectorAll('h1,h2,h3');if(!hs.length){tocSide.style.display='none';return;}tocSide.style.display='';hs.forEach((h,i)=>{h.id='h-'+i;const li=document.createElement('li');li.className='toc-'+h.tagName.toLowerCase();const a=document.createElement('a');a.href='#h-'+i;a.textContent=h.textContent;a.onclick=(e)=>{e.preventDefault();h.scrollIntoView({block:'start',behavior:'smooth'});};li.appendChild(a);tocList.appendChild(li);});}
+// ---- 搜索(in-memory) ----
+const searchInput=document.getElementById('search-input'),sideTree=document.getElementById('side-tree');
+let treeBackup=null,searchTimer;
+function doSearch(q){q=q.trim();if(!q){if(treeBackup!==null){sideTree.innerHTML=treeBackup;treeBackup=null;rebindTree();}return;}if(treeBackup===null)treeBackup=sideTree.innerHTML;
+const lq=q.toLowerCase(),hits=[];for(const f of SEARCH_INDEX){const lines=f.content.split('\n');for(let i=0;i<lines.length;i++){if(lines[i].toLowerCase().includes(lq)){hits.push({path:f.path,line:i+1,snippet:lines[i].trim().slice(0,120)});if(hits.length>=100)break;}}if(hits.length>=100)break;}
+if(!hits.length){sideTree.innerHTML='<div class="search-empty">无匹配</div>';return;}
+sideTree.innerHTML='<div class="search-results">'+hits.map(h=>{const idx=h.snippet.toLowerCase().indexOf(lq);const snip=idx>=0?escHtml(h.snippet.slice(0,idx))+'<mark>'+escHtml(h.snippet.slice(idx,idx+q.length))+'</mark>'+escHtml(h.snippet.slice(idx+q.length)):escHtml(h.snippet);return '<div class="search-hit" data-path="'+escHtml(h.path)+'"><div class="search-hit-file">'+escHtml(h.path)+' · line '+h.line+'</div><div class="search-hit-snippet">'+snip+'</div></div>';}).join('')+'</div>';
+sideTree.querySelectorAll('.search-hit').forEach(el=>{el.onclick=()=>loadFile(el.dataset.path);});}
+function rebindTree(){sideTree.querySelectorAll('.tree-dir-name').forEach(el=>{el.onclick=()=>el.parentElement.classList.toggle('collapsed');});sideTree.querySelectorAll('.tree-file').forEach(el=>{el.onclick=()=>loadFile(el.dataset.path);});}
+searchInput.addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>doSearch(searchInput.value),80);});
+// ---- 批注 ----
+function annKey(){return KEY_PREFIX+'annotations:'+currentFile;}
+function loadAnnotations(){try{annotations=JSON.parse(localStorage.getItem(annKey())||'[]');}catch{annotations=[];}updateAnnCounts();renderAnnList();highlightAnnotations();}
+function saveAnnotations(){try{localStorage.setItem(annKey(),JSON.stringify(annotations));}catch(e){toast('localStorage 满了');}updateAnnCounts();}
+function updateAnnCounts(){document.getElementById('ann-fab-count').textContent=annotations.length;document.getElementById('ann-count').textContent=annotations.length;}
+const toolbar=document.getElementById('ann-toolbar');let lastRange=null,lastText='';
+document.addEventListener('mouseup',(e)=>{if(e.target.closest('.ann-toolbar,.ann-dialog,.ann-panel,.ann-fab,.sidebar'))return;setTimeout(()=>{const sel=window.getSelection(),text=sel.toString().trim();const minLen=root.getAttribute('contenteditable')==='true'?1:3;if(!text||text.length<minLen||!root.contains(sel.anchorNode)){toolbar.classList.remove('show');return;}lastRange=sel.getRangeAt(0).cloneRange();lastText=text;const rect=sel.getRangeAt(0).getBoundingClientRect();toolbar.style.left=Math.min(rect.right+8,window.innerWidth-220)+'px';toolbar.style.top=Math.max(rect.top-50,10)+'px';toolbar.classList.add('show');},10);});
+document.addEventListener('mousedown',(e)=>{if(!e.target.closest('.ann-toolbar'))toolbar.classList.remove('show');});
+toolbar.querySelectorAll('button').forEach(btn=>{btn.onclick=(e)=>{e.preventDefault();if(btn.dataset.type){openAnnDialog(btn.dataset.type,lastText);toolbar.classList.remove('show');}else if(btn.dataset.fmt){applyFormat(btn.dataset.fmt);toolbar.classList.remove('show');}};});
+function applyFormat(fmt){if(!lastRange)return;const sel=window.getSelection();sel.removeAllRanges();sel.addRange(lastRange);try{if(fmt==='h2'||fmt==='h3'||fmt==='p')document.execCommand('formatBlock',false,fmt.toUpperCase());else if(fmt==='quote')document.execCommand('formatBlock',false,'BLOCKQUOTE');else if(fmt==='bold')document.execCommand('bold');else if(fmt==='italic')document.execCommand('italic');else if(fmt==='ul')document.execCommand('insertUnorderedList');else if(fmt==='code'){const r=sel.getRangeAt(0),c=document.createElement('code');c.appendChild(r.extractContents());r.insertNode(c);}}catch(err){console.warn(err);}root.dispatchEvent(new Event('input',{bubbles:true}));root.focus();}
+const annDialog=document.getElementById('ann-dialog'),annOverlay=document.getElementById('ann-overlay'),annDlgComment=document.getElementById('ann-dialog-comment');
+let dlgType='',dlgText='',dlgEditId=null;
+function openAnnDialog(type,text,editId){dlgType=type;dlgText=text;dlgEditId=editId||null;const m=TYPE_META[type];document.getElementById('ann-dialog-title').textContent=(editId?'编辑':'添加')+' '+m.i+' '+m.n+' 批注';document.getElementById('ann-dialog-selected').textContent=text;annDlgComment.value=editId?(annotations.find(a=>a.id===editId)?.comment||''):'';annDialog.classList.add('show');annOverlay.classList.add('show');setTimeout(()=>annDlgComment.focus(),50);}
+function closeAnnDialog(){annDialog.classList.remove('show');annOverlay.classList.remove('show');}
+document.getElementById('ann-cancel').onclick=closeAnnDialog;annOverlay.onclick=closeAnnDialog;
+document.getElementById('ann-confirm').onclick=()=>{const c=annDlgComment.value.trim();if(dlgEditId){const a=annotations.find(x=>x.id===dlgEditId);if(a){a.comment=c;a.timestamp=new Date().toISOString();}}else{annotations.push({id:'ann-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),type:dlgType,selected_text:dlgText,comment:c,timestamp:new Date().toISOString()});}saveAnnotations();renderAnnList();highlightAnnotations();closeAnnDialog();window.getSelection().removeAllRanges();};
+function highlightAnnotations(){root.querySelectorAll('.ann-mark').forEach(m=>{const t=document.createTextNode(m.textContent);m.replaceWith(t);});root.normalize();annotations.forEach(a=>{a._orphan=!highlightText(a.selected_text,a.type,a.id);});}
+function highlightText(text,type,id){const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);let n;while((n=walker.nextNode())){const idx=n.nodeValue.indexOf(text);if(idx>=0){const before=n.nodeValue.slice(0,idx),after=n.nodeValue.slice(idx+text.length),mark=document.createElement('span');mark.className='ann-mark';mark.dataset.type=type;mark.dataset.id=id;mark.textContent=text;mark.onclick=()=>mark.scrollIntoView({block:'center'});const parent=n.parentNode;if(before)parent.insertBefore(document.createTextNode(before),n);parent.insertBefore(mark,n);if(after)parent.insertBefore(document.createTextNode(after),n);parent.removeChild(n);return true;}}return false;}
+const annList=document.getElementById('ann-list');
+function renderAnnList(){annList.innerHTML='';if(!annotations.length){annList.innerHTML='<div style="color:var(--muted);font-size:12px;text-align:center;padding:14px">还没有批注</div>';return;}const groups={bad:[],suggest:[],question:[],good:[]};annotations.forEach(a=>groups[a.type]?.push(a));['bad','suggest','question','good'].forEach(type=>{const items=groups[type];if(!items.length)return;const m=TYPE_META[type],head=document.createElement('div');head.style.cssText='font-size:11px;color:var(--muted);margin:6px 0 4px;text-transform:uppercase;font-weight:600';head.textContent=m.i+' '+m.n+' ('+items.length+')';annList.appendChild(head);items.forEach(a=>{const div=document.createElement('div');div.className='ann-list-item';div.dataset.type=a.type;div.innerHTML='<div class="ann-list-text">"'+escHtml(a.selected_text.slice(0,80))+'"</div>'+(a.comment?'<div style="font-size:12px">'+escHtml(a.comment)+'</div>':'')+'<div class="ann-list-actions"><button data-act="edit">编辑</button><button data-act="del">删除</button></div>';div.querySelector('[data-act=edit]').onclick=()=>openAnnDialog(a.type,a.selected_text,a.id);div.querySelector('[data-act=del]').onclick=()=>{if(confirm('删除批注?')){annotations=annotations.filter(x=>x.id!==a.id);saveAnnotations();renderAnnList();highlightAnnotations();}};annList.appendChild(div);});});}
+document.getElementById('ann-fab').onclick=()=>document.getElementById('ann-panel').classList.toggle('open');
+document.getElementById('ann-close').onclick=()=>document.getElementById('ann-panel').classList.remove('open');
+document.getElementById('ann-clear').onclick=()=>{if(!annotations.length)return;if(confirm('清空当前文件的批注?')){annotations=[];saveAnnotations();renderAnnList();highlightAnnotations();}};
+document.getElementById('ann-copy').onclick=()=>{if(!annotations.length){toast('没有批注');return;}const lines=['# 批注 · '+currentFile,'生成于 '+new Date().toLocaleString(),''];const groups={bad:[],suggest:[],question:[],good:[]};annotations.forEach(a=>groups[a.type]?.push(a));['bad','suggest','question','good'].forEach(type=>{const items=groups[type];if(!items.length)return;const m=TYPE_META[type];lines.push('## '+m.i+' '+m.n);items.forEach(a=>{lines.push('- 选段: "'+a.selected_text.slice(0,200)+'"');if(a.comment)lines.push('  评语: '+a.comment);});lines.push('');});navigator.clipboard.writeText(lines.join('\n')).then(()=>toast('已复制 markdown 摘要')).catch(()=>toast('复制失败'));};
+// ---- 编辑 + 保存回 vault ----
+const editFab=document.getElementById('edit-fab'),saveFab=document.getElementById('save-fab'),editBanner=document.getElementById('edit-banner');
+function enterEdit(){root.querySelectorAll('.ann-mark').forEach(m=>{const t=document.createTextNode(m.textContent);m.replaceWith(t);});root.normalize();toolbar.classList.add('edit-mode');root.setAttribute('contenteditable','true');root.focus();editBanner.classList.add('show');saveFab.classList.add('show');editFab.classList.add('active');editFab.innerHTML='✕ 关闭';}
+function exitEdit(){root.removeAttribute('contenteditable');editBanner.classList.remove('show');saveFab.classList.remove('show');editFab.classList.remove('active');editFab.innerHTML='✏ 编辑';toolbar.classList.remove('edit-mode');buildToc();highlightAnnotations();}
+editFab.onclick=()=>{if(!currentFile)return;root.getAttribute('contenteditable')==='true'?exitEdit():enterEdit();};
+document.getElementById('exit-edit').onclick=exitEdit;
+saveFab.onclick=async()=>{if(typeof TurndownService==='undefined'){toast('turndown 没加载');return;}const td=new TurndownService({headingStyle:'atx',codeBlockStyle:'fenced',bulletListMarker:'-',emDelimiter:'*',strongDelimiter:'**',linkStyle:'inlined'});if(typeof turndownPluginGfm!=='undefined')td.use(turndownPluginGfm.gfm);else td.keep(['table','thead','tbody','tr','th','td']);const md=td.turndown(root.innerHTML);if(!confirm('保存到 '+currentFile+'?\n(会覆盖 vault 里的原文件)'))return;try{const r=await fetch('/api/save?path='+encodeURIComponent(currentFile),{method:'POST',body:md,headers:{'Content-Type':'text/markdown'}});if(!r.ok){const e=await r.json().catch(()=>({}));toast('保存失败:'+(e.error||r.status));return;}const d=await r.json();toast('已保存 '+d.bytes+' bytes 到 vault');currentRaw=md;}catch(err){toast('保存失败:'+err.message);}};
+// ---- 启动 ----
+async function bootstrap(){try{const[filesRes,contentRes]=await Promise.all([fetch('/api/files').then(r=>r.json()),fetch('/api/files-content').then(r=>r.json())]);SEARCH_INDEX=contentRes;const tree=buildTree(filesRes.files),expanded=loadExpanded();sideTree.innerHTML='';renderTree(tree,sideTree,expanded);document.getElementById('side-foot').textContent=filesRes.count+' files · '+(filesRes.total_size/1024).toFixed(1)+' KB';const m=location.hash.match(/file=([^&]+)/);if(m){const path=decodeURIComponent(m[1]);if(filesRes.files.find(f=>f.path===path))loadFile(path);}}catch(err){sideTree.innerHTML='<div style="padding:14px;color:#c44;font-size:12px">加载 vault 失败: '+err.message+'</div>';}}
+bootstrap();
+window.addEventListener('hashchange',()=>{const m=location.hash.match(/file=([^&]+)/);if(m){const path=decodeURIComponent(m[1]);if(path!==currentFile)loadFile(path);}});
+"""
+
+_VAULT_TPL = (
+    '<!doctype html><html><head><meta charset="utf-8"><title>md-lens vault · __VAULT_NAME__</title>'
+    '<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>'
+    '<script src="https://cdn.jsdelivr.net/npm/turndown@7.1.3/dist/turndown.min.js"></script>'
+    '<script src="https://cdn.jsdelivr.net/npm/@joplin/turndown-plugin-gfm@1.0.59/dist/turndown-plugin-gfm.min.js"></script>'
+    '<style>' + _VAULT_CSS + '</style></head><body>'
+    + _VAULT_BODY +
+    '<script>' + _VAULT_JS + '</script></body></html>'
+)
+
+
+def _render_vault_html(vault_root, vault_hash):
+    """生成 vault SPA HTML(sidebar + content panel + 批注/编辑)。
+
+    复用单文件 mode 的 CSS 视觉 + 批注/编辑 JS 模式,加 sidebar 跟 SPA file switch。
+    所有 .md 内容启动时一次 fetch /api/files-content 给前端,搜索是 in-memory instant。
+    """
+    return _VAULT_TPL.replace("__VAULT_HASH__", html.escape(vault_hash)).replace(
+        "__VAULT_NAME__", html.escape(os.path.basename(str(vault_root)) or str(vault_root))
+    )
+
+
+def run_vault_server(vault_dir, port):
+    """启 http.server,serve vault HTML + JSON endpoints。"""
+    import json, urllib.parse, webbrowser, threading, hashlib
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+
+    vault_root = Path(vault_dir).expanduser().resolve()
+    if not vault_root.is_dir():
+        print(f"ERROR: vault 目录不存在或不是目录:{vault_root}", file=sys.stderr); sys.exit(2)
+    vault_hash = hashlib.md5(str(vault_root).encode()).hexdigest()[:12]
+
+    def _safe_rel(rel):
+        """防 path traversal:resolve 后必须在 vault_root 下。返回 absolute Path 或 None。"""
+        try:
+            cand = (vault_root / rel).resolve()
+            cand.relative_to(vault_root)
+            return cand if cand.suffix == '.md' and cand.exists() else None
+        except (ValueError, OSError):
+            return None
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *a):
+            sys.stderr.write("[md-lens] %s - %s\n" % (self.log_date_time_string(), fmt % a))
+
+        def _json(self, data, status=200):
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            self.send_response(status); self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+
+        def _html(self, body_str, status=200):
+            body = body_str.encode('utf-8')
+            self.send_response(status); self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+
+        def _err(self, msg, status=400):
+            self._json({'error': msg}, status=status)
+
+        def do_GET(self):
+            u = urllib.parse.urlparse(self.path)
+            path = u.path; qs = urllib.parse.parse_qs(u.query)
+            if path == '/' or path == '/index.html':
+                self._html(_render_vault_html(vault_root, vault_hash))
+            elif path == '/api/files':
+                files = collect_md_files(vault_root)
+                out = []
+                total_size = 0
+                for rel in files:
+                    p = vault_root / rel
+                    try: st = p.stat(); total_size += st.st_size
+                    except OSError: continue
+                    out.append({'path': rel, 'size': st.st_size, 'mtime': st.st_mtime})
+                self._json({'files': out, 'total_size': total_size, 'count': len(out)})
+            elif path == '/api/file':
+                rel = (qs.get('path') or [''])[0]
+                p = _safe_rel(rel)
+                if not p: return self._err('file not found or invalid path', 404)
+                try: raw = p.read_text(encoding='utf-8')
+                except OSError as e: return self._err(f'read failed: {e}', 500)
+                # 取第一个 H1 作 title;否则用文件名
+                title_line = next((l for l in raw.splitlines() if l.startswith('# ')), None)
+                t = title_line[2:].strip() if title_line else os.path.basename(rel)
+                self._json({'path': rel, 'raw': raw, 'title': t, 'raw_size': len(raw)})
+            elif path == '/api/files-content':
+                # 一次性 ship 全部 md content 供前端 in-memory search
+                files = collect_md_files(vault_root)
+                out = []
+                for rel in files:
+                    p = vault_root / rel
+                    try: raw = p.read_text(encoding='utf-8')
+                    except (OSError, UnicodeDecodeError): continue
+                    title_line = next((l for l in raw.splitlines() if l.startswith('# ')), None)
+                    out.append({'path': rel, 'content': raw,
+                                'title': title_line[2:].strip() if title_line else os.path.basename(rel)})
+                self._json(out)
+            else:
+                self._err('not found', 404)
+
+        def do_POST(self):
+            u = urllib.parse.urlparse(self.path)
+            if u.path != '/api/save':
+                return self._err('not found', 404)
+            qs = urllib.parse.parse_qs(u.query)
+            rel = (qs.get('path') or [''])[0]
+            p = _safe_rel(rel) if rel else None
+            # 允许 save 到 vault 下任意 .md(即便文件还不存在,但要在 vault 内)
+            if not p:
+                try:
+                    cand = (vault_root / rel).resolve()
+                    cand.relative_to(vault_root)
+                    if cand.suffix == '.md': p = cand
+                except (ValueError, OSError): pass
+            if not p: return self._err('invalid path', 400)
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                data = self.rfile.read(length).decode('utf-8')
+            except (ValueError, UnicodeDecodeError) as e:
+                return self._err(f'bad body: {e}', 400)
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(data, encoding='utf-8')
+            except OSError as e:
+                return self._err(f'write failed: {e}', 500)
+            self._json({'ok': True, 'path': rel, 'bytes': len(data.encode('utf-8'))})
+
+    httpd = HTTPServer(('127.0.0.1', port), H)
+    url = f'http://127.0.0.1:{port}/'
+    print(f"md-lens vault serving {vault_root}")
+    print(f"  → {url}  ({len(collect_md_files(vault_root))} md files)")
+    print(f"  Ctrl-C 退出")
+    threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    try: httpd.serve_forever()
+    except KeyboardInterrupt: print("\n[md-lens] bye"); httpd.server_close()
+
+
+# 入口:分发 --install / --vault / 单文件
 if len(sys.argv) >= 2 and sys.argv[1] == "--install":
     self_install()
 
+# vault mode 走独立路径,不污染下面单文件逻辑
+if "--vault" in sys.argv:
+    # 解析 --vault DIR [--port N]
+    args = sys.argv[1:]
+    vault_dir = None
+    port = 8000
+    positional = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--vault":
+            if i + 1 >= len(args):
+                print("ERROR: --vault 需要跟一个目录 path", file=sys.stderr); sys.exit(2)
+            vault_dir = args[i + 1]; i += 2
+        elif a == "--port":
+            if i + 1 >= len(args):
+                print("ERROR: --port 需要跟一个数字", file=sys.stderr); sys.exit(2)
+            try: port = int(args[i + 1])
+            except ValueError:
+                print("ERROR: --port 必须是整数", file=sys.stderr); sys.exit(2)
+            i += 2
+        else:
+            positional.append(a); i += 1
+    if positional:
+        print("ERROR: --vault 跟 positional path 互斥(给了:%s)" % " ".join(positional), file=sys.stderr); sys.exit(2)
+    if not vault_dir:
+        print("ERROR: --vault 需要跟一个目录 path", file=sys.stderr); sys.exit(2)
+    run_vault_server(vault_dir, port)
+    sys.exit(0)
+
 if len(sys.argv) < 2:
     print(__doc__)
+    print("ERROR: 缺参数 — 需要 <input.md> 或 --vault <dir>", file=sys.stderr)
     sys.exit(1)
 
 src_path = sys.argv[1]
